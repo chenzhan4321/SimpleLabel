@@ -59,6 +59,7 @@ class ResizableRectItem:
     
     HANDLE_SIZE = 8
     HANDLE_SPACE = HANDLE_SIZE + 1
+    MIN_SIZE = 10  # 添加最小尺寸常量
     HANDLE_CURSORS = {
         'topleft': Qt.SizeFDiagCursor,
         'topright': Qt.SizeBDiagCursor,
@@ -148,11 +149,22 @@ class ResizableRectItem:
             new_rect.setRight(rect.right() + delta.x())
 
         # 确保矩形不会太小
-        if new_rect.width() >= self.HANDLE_SPACE * 2 and new_rect.height() >= self.HANDLE_SPACE * 2:
-            self.rect_item.setRect(new_rect)
-            # 更新文本位置到矩形框内部
-            self.text_item.setPos(new_rect.topLeft() + QPointF(5, 5))
-            self.update_handles()
+        if new_rect.width() < self.MIN_SIZE:
+            if 'right' in handle_pos:
+                new_rect.setRight(new_rect.left() + self.MIN_SIZE)
+            elif 'left' in handle_pos:
+                new_rect.setLeft(new_rect.right() - self.MIN_SIZE)
+                
+        if new_rect.height() < self.MIN_SIZE:
+            if 'bottom' in handle_pos:
+                new_rect.setBottom(new_rect.top() + self.MIN_SIZE)
+            elif 'top' in handle_pos:
+                new_rect.setTop(new_rect.bottom() - self.MIN_SIZE)
+
+        self.rect_item.setRect(new_rect)
+        # 更新文本位置到矩形框内部
+        self.text_item.setPos(new_rect.topLeft() + QPointF(5, 5))
+        self.update_handles()
 
     def delete(self):
         """删除矩形及相关项"""
@@ -201,6 +213,12 @@ class LabelingScene(QGraphicsScene):
         self.selected_item = None
         self.resizing = False
         self.current_handle = None
+        
+        # 添加双击检测相关的属性
+        self.last_click_time = None
+        self.last_click_pos = None
+        self.double_click_interval = 300  # 毫秒
+        
         # 设置字体
         self.label_font = QFont()
         # 尝试使用叙利亚文字体
@@ -222,96 +240,46 @@ class LabelingScene(QGraphicsScene):
         self.label_font.setPointSize(18)
         self.label_font.setStyleStrategy(QFont.PreferAntialias)
         
-        # 修改标签缓存文件路径和格式
         self.current_image_path = None
-        self.label_file = None
-        self.labels = set()
-        # 修改双击检测逻辑
-        self.last_click_time = None
-        self.last_click_pos = None
-        self.double_click_interval = 300  # 毫秒
-        
-    def load_labels(self):
-        """从 Label.txt 加载标签"""
-        try:
-            if self.label_file and os.path.exists(self.label_file):
-                with open(self.label_file, 'r', encoding='utf-8') as f:
-                    self.labels = set(line.strip() for line in f if line.strip())
-        except Exception as e:
-            print(f"加载标签文件时出错: {e}")
+        self.labels = set()  # 保存当前图片的标签集合
 
     def set_image_path(self, path):
-        """设置当前图片路径并更新标签文件路径"""
+        """设置当前图片路径"""
         self.current_image_path = path
         if path:
-            # 更新标签文件路径
-            self.label_file = os.path.join(os.path.dirname(path), 'Label.txt')
-            # 加载标签
-            self.load_labels()
+            # 加载对应的JSON文件中的标签
+            json_path = os.path.splitext(path)[0] + '.json'
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        self.labels = set(item['label'] for item in data if 'label' in item)
+                except Exception as e:
+                    print(f"加载JSON文件时出错: {str(e)}")
 
-    def format_annotation_line(self):
-        """格式化当前图片的标注行"""
+    def save_annotations(self):
+        """保存标注到JSON文件"""
         if not self.current_image_path:
-            return ""
-            
-        lines = []
-        # 添加图片路径注释行
-        lines.append(f"# {self.current_image_path}")
-        
-        # 添加标注数据行
-        annotations = []
-        for item in self.rectangles:
-            rect = item.rect_item.rect()
-            annotation = f"{rect.x()},{rect.y()},{rect.right()},{rect.bottom()},{item.label}"
-            annotations.append(annotation)
-        
-        if annotations:
-            lines.append("\n".join(annotations))
-        
-        return "\n".join(lines) + "\n"
-
-    def save_labels(self):
-        """保存标签到 Label.txt"""
-        if not self.label_file or not self.current_image_path:
             return
             
         try:
-            # 读取现有内容
-            existing_content = ""
-            if os.path.exists(self.label_file):
-                with open(self.label_file, 'r', encoding='utf-8') as f:
-                    existing_content = f.read()
+            annotations = []
+            for item in self.rectangles:
+                rect = item.rect_item.rect()
+                annotations.append({
+                    'label': item.label,
+                    'x': rect.x(),
+                    'y': rect.y(),
+                    'width': rect.width(),
+                    'height': rect.height()
+                })
             
-            # 解析现有内容，按图片路径分组
-            annotations = {}
-            current_image = None
-            for line in existing_content.split('\n'):
-                if line.startswith('#'):
-                    current_image = line[1:].strip()
-                    annotations[current_image] = []
-                elif line.strip() and current_image:
-                    annotations[current_image].append(line)
-            
-            # 更新当前图片的标注
-            current_annotation = self.format_annotation_line()
-            if current_annotation:
-                annotations[self.current_image_path] = current_annotation.split('\n')[1:-1]
-            
-            # 重新组织内容
-            new_content = []
-            for image_path, lines in annotations.items():
-                if lines:  # 只保存有标注的图片
-                    new_content.append(f"# {image_path}")
-                    new_content.extend(lines)
-            
-            # 保存文件
-            os.makedirs(os.path.dirname(self.label_file), exist_ok=True)
-            with open(self.label_file, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(new_content) + '\n')
-            
-            print(f"标签已保存到: {self.label_file}")
+            json_path = os.path.splitext(self.current_image_path)[0] + '.json'
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(annotations, f, ensure_ascii=False, indent=2)
+            print(f"标注已保存到: {json_path}")
         except Exception as e:
-            print(f"保存标签文件时出错: {e}")
+            print(f"保存标注时出错: {str(e)}")
 
     def update_labels(self):
         """更新标签集合并保存"""
@@ -322,25 +290,25 @@ class LabelingScene(QGraphicsScene):
                 current_labels.add(item.label)
         
         # 更新标签集合
-        self.labels.update(current_labels)
-        self.save_labels()
-        print(f"标签已更新: {sorted(self.labels)}")  # 调试信息
+        self.labels = current_labels
+        # 保存标注
+        self.save_annotations()
+        print(f"标签已更新: {sorted(self.labels)}")
 
     def add_label(self, label):
-        """添加新标签并立即保存"""
+        """添加新标签并保存"""
         if label:
             self.labels.add(label)
-            self.save_labels()
-            print(f"新标签已添加: {label}")  # 调试信息
+            self.save_annotations()
+            print(f"新标签已添加: {label}")
 
     def remove_label(self, label):
-        """删除标签并立即保存"""
+        """删除标签并保存"""
         if label in self.labels:
-            # 检查是否还有其他矩形使用这个标签
             if not any(item.label == label for item in self.rectangles):
                 self.labels.remove(label)
-                self.save_labels()
-                print(f"标签已删除: {label}")  # 调试信息
+                self.save_annotations()
+                print(f"标签已删除: {label}")
 
     def addLabelText(self, text, pos):
         # 创建文本项
@@ -451,6 +419,17 @@ class LabelingScene(QGraphicsScene):
         elif event.button() == Qt.LeftButton and self.drawing:
             self.drawing = False
             if self.current_rect:
+                # 获取当前矩形的尺寸
+                rect = self.current_rect.rect()
+                # 如果宽度或高度小于最小值，调整大小
+                if rect.width() < ResizableRectItem.MIN_SIZE or rect.height() < ResizableRectItem.MIN_SIZE:
+                    new_rect = QRectF(rect)
+                    if rect.width() < ResizableRectItem.MIN_SIZE:
+                        new_rect.setWidth(ResizableRectItem.MIN_SIZE)
+                    if rect.height() < ResizableRectItem.MIN_SIZE:
+                        new_rect.setHeight(ResizableRectItem.MIN_SIZE)
+                    self.current_rect.setRect(new_rect)
+
                 dialog = LabelDialog()
                 dialog.setFont(self.label_font)
                 
@@ -469,25 +448,8 @@ class LabelingScene(QGraphicsScene):
             self.current_rect = None
 
     def saveAnnotations(self):
-        if not self.current_image_path:
-            QMessageBox.warning(self, "警告", "请先打开一张图片！")
-            return
-            
-        annotations = []
-        for item in self.rectangles:
-            rect = item.rect_item.rect()  # 使用 ResizableRectItem 的属性
-            annotations.append({
-                'label': item.label,
-                'x': rect.x(),
-                'y': rect.y(),
-                'width': rect.width(),
-                'height': rect.height()
-            })
-        
-        # 使用与图片相同的文件名，但扩展名为.json
-        json_path = os.path.splitext(self.current_image_path)[0] + '.json'
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(annotations, f, ensure_ascii=False, indent=2)
+        """保存当前标注"""
+        self.save_annotations()
 
     def loadAnnotations(self, file_path=None):
         """加载标注文件
@@ -544,8 +506,7 @@ class LabelingScene(QGraphicsScene):
                     try:
                         rect = self.addRect(
                             QRectF(ann['x'], ann['y'], ann['width'], ann['height']),
-                            QPen(QColor(255, 0, 0), 2)
-                        )
+                            QPen(QColor(255, 0, 0), 2))
                         text_item = self.addLabelText(
                             ann['label'], 
                             QPointF(ann['x'], ann['y'])
@@ -566,7 +527,7 @@ class LabelingScene(QGraphicsScene):
                 self.view.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
                 
                 # 保存更新后的标签
-                self.save_labels()
+                self.save_annotations()
                 
             except Exception as e:
                 error_msg = f"加载标注文件时出错: {str(e)}"
@@ -637,7 +598,7 @@ class ImageLabeler(QMainWindow):
             print(f"保存配置文件时出错: {e}")
     
     def load_directory(self, dir_path):
-        """加载指定目录的图片"""
+        """加载指定目录的图片和标注"""
         self.file_list.clear()
         
         # 获取所有支持的图片文件
@@ -649,6 +610,22 @@ class ImageLabeler(QMainWindow):
         image_files.sort()
         for file in image_files:
             self.file_list.addItem(file)
+        
+        # 加载标注文件
+        label_file = os.path.join(dir_path, 'Label.txt')
+        if os.path.exists(label_file):
+            self.scene.label_file = label_file
+            self.scene.load_labels()
+            
+            # 如果列表中有文件，自动加载第一个文件的标注
+            if self.file_list.count() > 0:
+                first_file = os.path.join(dir_path, self.file_list.item(0).text())
+                self.loadImage(first_file)
+                
+                # 检查并加载对应的JSON标注文件
+                json_path = os.path.splitext(first_file)[0] + '.json'
+                if os.path.exists(json_path):
+                    self.loadAnnotations(json_path)
     
     def initUI(self):
         self.setWindowTitle('简单图片标注工具')
@@ -749,11 +726,14 @@ class ImageLabeler(QMainWindow):
             self.zoom_slider.setValue(100)
             self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
             
-            # 自动加载对应的标注文件（如果存在）
+            # 加载对应的JSON标注文件
             json_path = os.path.splitext(file_path)[0] + '.json'
             if os.path.exists(json_path):
                 self.loadAnnotations(json_path)
-    
+            else:
+                # 如果JSON文件不存在，创建空的标注文件
+                self.scene.save_annotations()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.scene.sceneRect().width() > 0:
@@ -762,25 +742,8 @@ class ImageLabeler(QMainWindow):
             self.view.centerOn(self.scene.sceneRect().center())
 
     def saveAnnotations(self):
-        if not self.current_image_path:
-            QMessageBox.warning(self, "警告", "请先打开一张图片！")
-            return
-            
-        annotations = []
-        for item in self.scene.rectangles:
-            rect = item.rect_item.rect()  # 使用 ResizableRectItem 的属性
-            annotations.append({
-                'label': item.label,
-                'x': rect.x(),
-                'y': rect.y(),
-                'width': rect.width(),
-                'height': rect.height()
-            })
-        
-        # 使用与图片相同的文件名，但扩展名为.json
-        json_path = os.path.splitext(self.current_image_path)[0] + '.json'
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(annotations, f, ensure_ascii=False, indent=2)
+        """保存当前标注"""
+        self.scene.save_annotations()
 
     def loadAnnotations(self, file_path=None):
         """加载标注文件
@@ -837,8 +800,7 @@ class ImageLabeler(QMainWindow):
                     try:
                         rect = self.scene.addRect(
                             QRectF(ann['x'], ann['y'], ann['width'], ann['height']),
-                            QPen(QColor(255, 0, 0), 2)
-                        )
+                            QPen(QColor(255, 0, 0), 2))
                         text_item = self.scene.addLabelText(
                             ann['label'], 
                             QPointF(ann['x'], ann['y'])
@@ -859,7 +821,7 @@ class ImageLabeler(QMainWindow):
                 self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
                 
                 # 保存更新后的标签
-                self.scene.save_labels()
+                self.scene.save_annotations()
                 
             except Exception as e:
                 error_msg = f"加载标注文件时出错: {str(e)}"
@@ -876,6 +838,33 @@ class ImageLabeler(QMainWindow):
             self.view.setTransform(QTransform().scale(self.zoom_factor, self.zoom_factor))
             # 确保视图居中
             self.view.centerOn(self.scene.sceneRect().center())
+
+    def loadAnnotationsFromLines(self, annotation_lines):
+        """从标注行加载标注"""
+        for line in annotation_lines:
+            try:
+                parts = line.split(',')
+                if len(parts) >= 5:
+                    x, y, right, bottom = map(float, parts[:4])
+                    label = parts[4]
+                    
+                    rect = self.scene.addRect(
+                        QRectF(x, y, right - x, bottom - y),
+                        QPen(QColor(255, 0, 0), 2))
+                    text_item = self.scene.addLabelText(
+                        label,
+                        QPointF(x, y)
+                    )
+                    resizable_rect = ResizableRectItem(
+                        self.scene,
+                        rect,
+                        label,
+                        text_item
+                    )
+                    self.scene.rectangles.append(resizable_rect)
+                    self.scene.add_label(label)
+            except Exception as e:
+                print(f"加载标注行时出错: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
